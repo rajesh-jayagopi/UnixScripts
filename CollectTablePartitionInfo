@@ -1,0 +1,65 @@
+#!/bin/bash
+
+# Input file
+input_file="/mnt/data/file-PQda8z2dR19E3WoaGGZlv5v8"
+
+# Output files
+output_file_matched="matched_audit_id.csv"
+output_file_unmatched="unmatched_audit_id.csv"
+
+# HDFS root directory
+hdfs_root="/haas/aaa/db/"
+
+# Header for the CSV files
+header="table_path,partition_column_names,partition_column_values,num_data_files"
+
+# Initialize output files with headers
+echo $header > $output_file_matched
+echo $header > $output_file_unmatched
+
+# Function to recursively find the deepest directory
+find_deepest_dir() {
+  local base_path=$1
+  local deepest_dir=$base_path
+
+  for dir in $(hdfs dfs -ls "$base_path" 2>/dev/null | awk '$1 ~ /^d/ {print $8}'); do
+    local subdir=$(find_deepest_dir "$dir")
+    if [ $(echo "$subdir" | grep -c '/') -gt $(echo "$deepest_dir" | grep -c '/') ]; then
+      deepest_dir=$subdir
+    fi
+  done
+
+  echo "$deepest_dir"
+}
+
+# Read the input file line by line
+while IFS=',' read -r db_name audit_id; do
+  # Get the list of base directories for the current database
+  hdfs dfs -ls "${hdfs_root}${db_name}/datafiles/" | awk '{print $8}' | while read base_path; do
+    # Get the list of tables for the current base directory
+    hdfs dfs -ls "$base_path" | awk '{print $8}' | while read table_path; do
+      # Get the deepest partition directory (last partition directory)
+      deepest_partition_dir=$(find_deepest_dir "$table_path")
+      
+      # Extract partition column names and values
+      partition_info=$(echo $deepest_partition_dir | awk -F"$table_path/" '{print $2}')
+      partition_columns=$(echo $partition_info | sed 's;/; ;g' | awk '{for (i=1; i<=NF; i++) printf "%s,", $i}' | sed 's/,$//')
+      
+      # Get the number of data files (parquet files or files starting with 'part-')
+      num_data_files=$(hdfs dfs -ls "$deepest_partition_dir" | grep -E '(\.parquet|part-)' | wc -l)
+      
+      # Check if the audit_id matches
+      if [[ $partition_info == *"audit_id=${audit_id}"* ]]; then
+        # Add the row to the matched output file
+        echo "${table_path},${partition_columns},${audit_id},${num_data_files}" >> $output_file_matched
+      else
+        # Add the row to the unmatched output file
+        echo "${table_path},${partition_columns},${audit_id},${num_data_files}" >> $output_file_unmatched
+      fi
+    done
+  done
+done < $input_file
+
+echo "CSV files generated:"
+echo "Matched: $output_file_matched"
+echo "Unmatched: $output_file_unmatched"
